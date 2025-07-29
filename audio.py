@@ -97,13 +97,22 @@ class AudioSplitter:
             if force_split and total_duration <= self.max_duration_seconds:
                 # Short but large file - split based on file size
                 mb_per_second = file_size_mb / total_duration
-                target_segments = max(2, int(file_size_mb / 15))  # Target ~15MB per segment
+                target_segments = max(2, int(np.ceil(file_size_mb / 15)))  # Target ~15MB per segment
                 effective_segment_duration = total_duration / target_segments
                 logging.info(
                     f"Splitting short but large file into {target_segments} segments of ~{effective_segment_duration:.1f}s each")
             else:
-                # Long file - split based on duration
+                # Long file - split based on duration, but also check file size
                 segment_count = int(np.ceil(total_duration / self.max_duration_seconds))
+                
+                # Also check if we need more segments due to file size
+                if file_size_mb > 20:
+                    mb_per_second = file_size_mb / total_duration
+                    # Calculate how many segments we need to stay under 18MB per segment (with some buffer)
+                    size_based_segments = int(np.ceil(file_size_mb / 18))
+                    segment_count = max(segment_count, size_based_segments)
+                    logging.info(f"File size requires at least {size_based_segments} segments to stay under 18MB each")
+                
                 effective_segment_duration = total_duration / segment_count
 
                 # For large files, also consider file size
@@ -118,9 +127,17 @@ class AudioSplitter:
             segments = []
 
             for i in range(segment_count):
-                # Calculate start and end times
+                # Calculate start and end times with proper overlap
+                # Each segment starts at its natural position
                 start_time = i * effective_segment_duration
-                end_time = min(start_time + effective_segment_duration + self.overlap_seconds, total_duration)
+                
+                # End time is start + duration + overlap (except for last segment)
+                if i == segment_count - 1:
+                    # Last segment goes to the end
+                    end_time = total_duration
+                else:
+                    # Add overlap to the end of this segment
+                    end_time = min(start_time + effective_segment_duration + self.overlap_seconds, total_duration)
 
                 # Adjust for actual audio boundaries
                 start_sample = int(start_time * sample_rate)
