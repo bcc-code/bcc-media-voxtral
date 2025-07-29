@@ -21,8 +21,7 @@ COPY uv.lock .
 RUN uv sync --frozen
 
 # Copy application files
-COPY transcribe_audio.py .
-COPY web_server.py .
+COPY *.py .
 
 # Create directories for temporary files and output
 RUN mkdir -p /app/temp /app/output
