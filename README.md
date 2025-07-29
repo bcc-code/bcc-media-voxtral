@@ -1,3 +1,7 @@
+# WARNING:
+
+This is currently not working as intended and is not developed further. Timings are not quite correct and the model get's stuck sometimes.
+
 # Vox Audio Transcription
 
 Audio transcription using Mistral AI's Voxtral API. Supports long audio files and provides a REST API for job-based processing.
