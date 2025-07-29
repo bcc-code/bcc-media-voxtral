@@ -4,12 +4,10 @@ Unit tests for transcribe_audio.py - Word-level bracket timestamps only
 """
 
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import sys
 import os
 import tempfile
-from pathlib import Path
-import time
 import json
 
 # Add the current directory to the path so we can import transcribe_audio

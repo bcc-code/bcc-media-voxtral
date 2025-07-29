@@ -10,21 +10,22 @@ import os
 import queue
 import requests
 import sys
+import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from enum import Enum
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from audio import AudioConverter, AudioSplitter
 
 # Import our transcription modules
 from transcribe_audio import (
     MistralAudioTranscriber,
-    AudioConverter,
-    AudioSplitter,
     process_transcription_to_srt,
     join_srt_files_with_overlap,
     srt_to_json,
