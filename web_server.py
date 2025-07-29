@@ -4,22 +4,21 @@ Web API Server for Audio Transcription
 Provides REST API endpoints for job-based transcription processing
 """
 
-import os
-import sys
-import uuid
 import json
-import time
-import threading
+import logging
+import os
 import queue
 import requests
+import sys
+import threading
+import time
+import uuid
+from dataclasses import dataclass, asdict
 from datetime import datetime
+from enum import Enum
+from flask import Flask, request, jsonify, Response
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, asdict
-from enum import Enum
-
-from flask import Flask, request, jsonify, Response
-import logging
 
 # Import our transcription modules
 from transcribe_audio import (
@@ -33,7 +32,11 @@ from transcribe_audio import (
 )
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 class JobStatus(Enum):
@@ -233,7 +236,6 @@ class TranscriptionWorker:
                 base_name = Path(job.path).stem
             
             # Process transcription
-            import tempfile
             with tempfile.TemporaryDirectory() as temp_dir:
                 # Convert to MP3 if needed
                 if self.converter.needs_conversion(job.path):
@@ -283,8 +285,7 @@ class TranscriptionWorker:
                     return i, segment_srt_path, segment
                 
                 # Use ThreadPoolExecutor for parallel processing
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-                
+
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     # Submit all segment processing tasks
                     future_to_index = {}
@@ -534,7 +535,7 @@ def main():
     # Get API key
     api_key = os.getenv('MISTRAL_API_KEY')
     if not api_key:
-        print("Error: MISTRAL_API_KEY environment variable not set")
+        logger.error("Error: MISTRAL_API_KEY environment variable not set")
         sys.exit(1)
     
     # Start worker
