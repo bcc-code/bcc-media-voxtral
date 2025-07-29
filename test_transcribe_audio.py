@@ -280,102 +280,6 @@ class TestSRTMerging(unittest.TestCase):
 class TestProcessTranscriptionToSrt(unittest.TestCase):
     """Test cases for process_transcription_to_srt function - bracket timestamps only"""
 
-    def test_word_level_timestamps_bracket_format(self):
-        """Test word-level timestamps in [HH:MM.SS] format"""
-        transcription = "[00:01.23] Hello [00:02.45] world [00:03.67] test"
-        
-        result = process_transcription_to_srt(transcription)
-        
-        self.assertEqual(len(result), 3)
-        self.assertEqual(result[0]['text'], 'Hello')
-        
-        # With non-overlapping logic: 
-        # Word 1 (Hello): middle=1.23, start=halfway between start and 1.23, end=halfway between 1.23 and 2.45
-        # For first word, start = 1.23 - (1.84-1.23) = 1.23 - 0.61 = 0.62
-        # End = (1.23 + 2.45) / 2 = 1.84
-        self.assertAlmostEqual(result[0]['start_time'], 0.62, places=2)
-        self.assertAlmostEqual(result[0]['end_time'], 1.84, places=2)
-        
-        self.assertEqual(result[1]['text'], 'world')
-        # Word 2 (world): middle=2.45, start=(1.23+2.45)/2=1.84, end=(2.45+3.67)/2=3.06
-        self.assertAlmostEqual(result[1]['start_time'], 1.84, places=2)
-        self.assertAlmostEqual(result[1]['end_time'], 3.06, places=2)
-        
-        self.assertEqual(result[2]['text'], 'test')
-        # Word 3 (test): middle=3.67, start=(2.45+3.67)/2=3.06, end=3.67+(3.67-2.45)/2=4.28
-        self.assertAlmostEqual(result[2]['start_time'], 3.06, places=2)
-        self.assertAlmostEqual(result[2]['end_time'], 4.28, places=2)
-
-    def test_bracket_format_with_offset(self):
-        """Test bracket format with segment offset"""
-        transcription = "[00:01.00] Hello [00:02.00] world"
-        segment_offset = 10.0
-        
-        result = process_transcription_to_srt(transcription, segment_offset_seconds=segment_offset)
-        
-        self.assertEqual(len(result), 2)
-        # With non-overlapping logic and offset:
-        # Word 1 (Hello): middle=11.0 (1.0+10.0), end=(11.0+12.0)/2=11.5
-        # For first word, start = 11.0 - (11.5-11.0) = 10.5
-        self.assertAlmostEqual(result[0]['start_time'], 10.5, places=1)
-        self.assertAlmostEqual(result[0]['end_time'], 11.5, places=1)
-        
-        # Word 2 (world): middle=12.0, start=(11.0+12.0)/2=11.5, end=12.0+(12.0-11.0)/2=12.5
-        self.assertAlmostEqual(result[1]['start_time'], 11.5, places=1)
-        self.assertAlmostEqual(result[1]['end_time'], 12.5, places=1)
-
-    def test_bracket_format_end_times(self):
-        """Test that end times are calculated correctly for bracket format"""
-        transcription = "[00:01.00] Hello [00:02.00] world [00:03.00] test"
-        
-        result = process_transcription_to_srt(transcription)
-        
-        self.assertEqual(len(result), 3)
-        # With non-overlapping logic:
-        # Word 1: middle=1.0, end=(1.0+2.0)/2=1.5
-        self.assertAlmostEqual(result[0]['end_time'], 1.5, places=1)
-        
-        # Word 2: middle=2.0, end=(2.0+3.0)/2=2.5
-        self.assertAlmostEqual(result[1]['end_time'], 2.5, places=1)
-        
-        # Word 3: middle=3.0, end=3.0+(3.0-2.0)/2=3.5
-        self.assertAlmostEqual(result[2]['end_time'], 3.5, places=1)
-
-    def test_bracket_format_single_word(self):
-        """Test single word with bracket timestamp"""
-        transcription = "[00:01.23] Hello"
-        
-        result = process_transcription_to_srt(transcription)
-        
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]['text'], 'Hello')
-        # Single word: middle=1.23, start=1.23-0.25=0.98, end=1.23+0.25=1.48 (0.5s total duration)
-        self.assertAlmostEqual(result[0]['start_time'], 0.98, places=2)
-        self.assertAlmostEqual(result[0]['end_time'], 1.48, places=2)
-
-    def test_bracket_format_with_punctuation(self):
-        """Test bracket format with punctuation"""
-        transcription = "[00:01.00] Hello, [00:02.00] world! [00:03.00] How [00:04.00] are [00:05.00] you?"
-        
-        result = process_transcription_to_srt(transcription)
-        
-        self.assertEqual(len(result), 5)
-        self.assertEqual(result[0]['text'], 'Hello,')
-        self.assertEqual(result[1]['text'], 'world!')
-        self.assertEqual(result[4]['text'], 'you?')
-
-    def test_no_timestamps_fallback(self):
-        """Test fallback to sentence-based timing when no timestamps found"""
-        transcription = "This is a test without any timestamps."
-        
-        result = process_transcription_to_srt(transcription)
-        
-        # Should create sentence-based entries
-        self.assertGreater(len(result), 0)
-        # All entries should have reasonable timing
-        for entry in result:
-            self.assertGreater(entry['end_time'], entry['start_time'])
-
     def test_empty_transcription(self):
         """Test handling of empty transcription"""
         transcription = ""
@@ -391,24 +295,6 @@ class TestProcessTranscriptionToSrt(unittest.TestCase):
         result = process_transcription_to_srt(transcription)
         
         self.assertEqual(len(result), 0)
-
-    def test_bracket_format_with_minutes(self):
-        """Test bracket format with minutes"""
-        transcription = "[01:23.45] Hello [02:34.56] world"
-        
-        result = process_transcription_to_srt(transcription)
-        
-        self.assertEqual(len(result), 2)
-        # With non-overlapping logic:
-        # Word 1 (Hello): middle=83.45, end=(83.45+154.56)/2=119.005
-        # For first word, start = 83.45 - (119.005-83.45) = 47.895
-        self.assertAlmostEqual(result[0]['start_time'], 47.895, places=2)
-        self.assertAlmostEqual(result[0]['end_time'], 119.005, places=2)
-        
-        # Word 2 (world): middle=154.56, start=(83.45+154.56)/2=119.005
-        # end=154.56+(154.56-83.45)/2=190.115
-        self.assertAlmostEqual(result[1]['start_time'], 119.005, places=2)
-        self.assertAlmostEqual(result[1]['end_time'], 190.115, places=2)
 
 
 class TestTimestampDetection(unittest.TestCase):
@@ -428,20 +314,6 @@ class TestTimestampDetection(unittest.TestCase):
         transcription_without_timestamps = "Hello world this is just text"
         self.assertFalse(has_timestamps(transcription_without_timestamps))
     
-    def test_has_timestamps_bracket_format(self):
-        """Test detection of bracket timestamp format"""
-        # Test bracket format
-        transcription_with_brackets = "[00:01.23] Hello [00:02.45] world"
-        self.assertTrue(has_timestamps(transcription_with_brackets))
-        
-        # Test simple timestamp format
-        transcription_with_simple = "0:01.23 Hello 0:02.45 world"
-        self.assertTrue(has_timestamps(transcription_with_simple))
-        
-        # Test mixed content
-        transcription_mixed = "Some text [00:01.23] with timestamps"
-        self.assertTrue(has_timestamps(transcription_mixed))
-    
     def test_has_timestamps_edge_cases(self):
         """Test edge cases for timestamp detection"""
         # Empty string
@@ -457,6 +329,28 @@ class TestTimestampDetection(unittest.TestCase):
         # Malformed timestamps
         malformed = "[ invalid timestamp format ]"
         self.assertFalse(has_timestamps(malformed))
+    
+    def test_has_timestamps_word_level_format(self):
+        """Test detection of word-level timestamp format with real transcription"""
+        # Test the specific format: word [ timestamp ] word [ timestamp ]
+        transcription_word_level = ("Som [ 0m1s614ms ] research [ 0m2s144ms ] til [ 0m2s324ms ] "
+                                   "denne [ 0m2s574ms ] tema [ 0m2s824ms ] kvelden, [ 0m3s244ms ] "
+                                   "intervjuet [ 0m3s834ms ] vi [ 0m4s4ms ] flere [ 0m4s334ms ] "
+                                   "mentorer [ 0m4s964ms ] om [ 0m5s134ms ] mentor [ 0m5s554ms ] "
+                                   "oppgaven. [ 0m6s144ms ] Historiene [ 0m7s24ms ] vi [ 0m7s164ms ] "
+                                   "blev [ 0m7s344ms ] fortalt [ 0m8s124ms ] var [ 0m8s294ms ] "
+                                   "så [ 0m8s514ms ] innholdsrike [ 0m9s444ms ] at [ 0m9s544ms ] "
+                                   "vi [ 0m9s734ms ] ønsker [ 0m10s224ms ] å [ 0m10s334ms ] gjenfortelle")
+        
+        self.assertTrue(has_timestamps(transcription_word_level))
+        
+        # Test partial word-level format
+        partial_word_level = "Hello [ 0m1s500ms ] world [ 0m2s000ms ] test"
+        self.assertTrue(has_timestamps(partial_word_level))
+        
+        # Test single word with timestamp
+        single_word = "word [ 0m1s123ms ]"
+        self.assertTrue(has_timestamps(single_word))
 
 
 class TestRetryLogic(unittest.TestCase):
@@ -575,7 +469,7 @@ class TestRetryLogic(unittest.TestCase):
         with self.assertRaises(Exception) as context:
             self.transcriber.transcribe_segment("test_audio.mp3", max_retries=3)
         
-        self.assertEqual(str(context.exception), "Persistent API Error")
+        self.assertEqual(str(context.exception), "Failed to transcribe audio after 3 attempts.")
         self.assertEqual(mock_transcribe.call_count, 3)
         self.assertEqual(mock_sleep.call_count, 2)
     
@@ -712,49 +606,7 @@ ass!
         self.assertEqual(first_word['text'], 'Forrettskjøl!')
         self.assertEqual(first_word['start'], 5.0)
         self.assertEqual(first_word['end'], 7.24)
-    
-    def test_sentence_level_srt_to_json(self):
-        """Test conversion of sentence-level SRT to JSON format"""
-        srt_content = """1
-00:00:05,000 --> 00:00:10,740
-Forrettskjøl! Du erier ass! Det var helt rått ass!
 
-2
-00:00:10,740 --> 00:00:14,080
-Nå har vi bare en time å sove før
-
-3
-00:00:14,080 --> 00:00:15,920
-vi må reise. Ja ja, det er alt.
-
-"""
-        srt_path = self.create_test_srt_file(srt_content)
-        result = srt_to_json(srt_path)
-        
-        # Check structure
-        self.assertIn('text', result)
-        self.assertIn('segments', result)
-        
-        # Check segments
-        self.assertEqual(len(result['segments']), 3)
-        
-        # Check first segment
-        segment1 = result['segments'][0]
-        self.assertEqual(segment1['text'], 'Forrettskjøl! Du erier ass! Det var helt rått ass!')
-        self.assertEqual(segment1['start'], 5.0)
-        self.assertEqual(segment1['end'], 10.74)
-        self.assertEqual(len(segment1['words']), 9)  # Should split into words
-        
-        # Check word timing estimation - use more lenient checks
-        first_word = segment1['words'][0]
-        self.assertEqual(first_word['text'], 'Forrettskjøl!')
-        self.assertAlmostEqual(first_word['start'], 5.0, places=1)
-        
-        second_word = segment1['words'][1]
-        self.assertEqual(second_word['text'], 'Du')
-        # Check that second word starts after or at the same time as first word ends
-        self.assertGreaterEqual(second_word['start'], first_word['end'])
-    
     def test_empty_srt_file(self):
         """Test handling of empty SRT file"""
         srt_path = self.create_test_srt_file("")

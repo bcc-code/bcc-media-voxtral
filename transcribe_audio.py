@@ -207,29 +207,26 @@ class MistralAudioTranscriber:
                     logging.info(f"Retrying in 5 seconds...")
                     time.sleep(5)  # Longer delay after error
                 else:
-                    logging.error(f"All {max_retries} attempts failed.")
-                    raise
+                    raise Exception(f"Failed to transcribe audio after {max_retries} attempts.")
         
         return ""
 
 
+timestamp_pattern = r'\[\s*\d+m\d+s\d+ms\s*(?:-\s*\d+m\d+s\d+ms\s*)?\]'
+
+
 def has_timestamps(transcription: str) -> bool:
     """
-    Detect if transcription contains timestamps.
-    Returns True if timestamps are found, False otherwise.
+    Detect if transcription contains timestamps in Mistral format.
+    Supports:
+    - Mistral format: [ 0m1s122ms ]
+    - Range format: [ 0m0s694ms - 0m3s34ms ]
     """
-    timestamp_patterns = [
-        r'\[\s*\d+m\d+s\d+ms\s*\]',  # Mistral format: [ 0m1s122ms ]
-        r'\[\s*\d+m\d+s\d+ms\s*-\s*\d+m\d+s\d+ms\s*\]',  # Mistral range format: [ 0m0s694ms - 0m3s34ms ]
-        r'\[\d{1,2}:\d{2}\.\d{2}\]',  # [00:01.23] format
-        r'\d+:\d{2}\.\d{2}',  # Simple timestamp format
-    ]
+    if not transcription or not transcription.strip():
+        return False
     
-    for pattern in timestamp_patterns:
-        if re.search(pattern, transcription):
-            return True
-    
-    return False
+    # Mistral timestamp format (word-level and range)
+    return re.search(timestamp_pattern, transcription) is not None
 
 
 def process_transcription_to_srt(transcription: str, segment_offset_seconds: float = 0, word_level: bool = False) -> List[Dict]:
@@ -243,219 +240,77 @@ def process_transcription_to_srt(transcription: str, segment_offset_seconds: flo
     """
     entries = []
     
-
-    # Check if the transcription contains word-level timestamps
-    timestamp_patterns = [
-        r'(\S+?)(?:,)?\s*\[\s*(\d+m\d+s\d+ms)\s*\]',  # word, [ 0m1s122ms ] or word [ 0m1s122ms ] - word-level format
-        r'\[\s*(\d+m\d+s\d+ms)\s*-\s*(\d+m\d+s\d+ms)\s*\]\s*(.+?)(?=\[|$)',  # Mistral format: [ 0m0s694ms - 0m3s34ms ] text
-        r'\[(\d{1,2}:\d{2}\.\d{2})\]\s*(\S+)',  # [00:01.23] word
-    ]
-    
     word_timestamps = []
-    
-    for pattern in timestamp_patterns:
-        matches = re.findall(pattern, transcription, re.DOTALL)
-        logging.info(f"DEBUG: Testing pattern: {pattern}")
-        logging.info(f"DEBUG: Found {len(matches)} matches")
-        if matches and len(matches) > 0:
-            logging.info(f"DEBUG: First few matches: {matches[:3]}")
-        
-        if matches:
-            logging.info(f"Found {len(matches)} timestamped segments using pattern: {pattern}")
-            
-            if pattern.startswith(r'(\S+?)(?:,)?\s*\[\s*(\d+m\d+s\d+ms)'):  # Word-level format: word, [ 0m1s122ms ] or word [ 0m1s122ms ]
-                for match in matches:
-                    word, time_str = match
-                    
-                    # Convert Mistral timestamp format to seconds
-                    def parse_mistral_time(time_str):
-                        # Parse format like "0m3s34ms" or "1m23s456ms"
-                        time_match = re.match(r'(\d+)m(\d+)s(\d+)ms', time_str)
-                        if time_match:
-                            minutes, seconds, milliseconds = map(int, time_match.groups())
-                            return minutes * 60 + seconds + milliseconds / 1000.0
-                        return 0
-                    
-                    timestamp_seconds = parse_mistral_time(time_str)
-                    
-                    word_timestamps.append({
-                        'word': word.strip(),
-                        'timestamp': segment_offset_seconds + timestamp_seconds
-                    })
-            elif 'm' in pattern and 's' in pattern:  # Mistral format
-                for match in matches:
-                    start_time_str, end_time_str, text = match
-                    
-                    # Convert Mistral timestamp format to seconds
-                    def parse_mistral_time(time_str):
-                        # Parse format like "0m3s34ms" or "1m23s456ms"
-                        time_match = re.match(r'(\d+)m(\d+)s(\d+)ms', time_str)
-                        if time_match:
-                            minutes, seconds, milliseconds = map(int, time_match.groups())
-                            return minutes * 60 + seconds + milliseconds / 1000.0
-                        return 0
-                    
-                    start_seconds = parse_mistral_time(start_time_str)
-                    end_seconds = parse_mistral_time(end_time_str)
-                    
-                    word_timestamps.append({
-                        'text': text.strip(),
-                        'start_timestamp': segment_offset_seconds + start_seconds,
-                        'end_timestamp': segment_offset_seconds + end_seconds
-                    })
+
+    pattern = timestamp_pattern
+    matches = re.findall(pattern, transcription, re.DOTALL)
+    logging.info(f"DEBUG: Testing pattern: {pattern}")
+    logging.info(f"DEBUG: Found {len(matches)} matches")
+    if matches and len(matches) > 0:
+        logging.info(f"DEBUG: First few matches: {matches[:3]}")
+
+    if not matches:
+        return entries
+
+    logging.info(f"Found {len(matches)} timestamped segments using pattern: {pattern}")
+
+    for match in matches:
+        word, time_str = match
+
+        timestamp_seconds = parse_mistral_time(time_str)
+
+        word_timestamps.append({
+            'word': word.strip(),
+            'timestamp': segment_offset_seconds + timestamp_seconds
+        })
+
+    if not word_timestamps:
+        return entries
+
+    for i, word_data in enumerate(word_timestamps):
+        word = word_data['word']
+        middle_timestamp = word_data['timestamp']
+
+        # Calculate start and end times to avoid overlaps
+        if i < len(word_timestamps) - 1:
+            next_middle = word_timestamps[i + 1]['timestamp']
+            # End time is halfway between this word's middle and next word's middle
+            end_time = (middle_timestamp + next_middle) / 2
+        else:
+            # For last word, estimate duration based on previous word or use default
+            if i > 0:
+                prev_middle = word_timestamps[i - 1]['timestamp']
+                word_duration = middle_timestamp - prev_middle
+                end_time = middle_timestamp + word_duration / 2
             else:
-                # Handle other timestamp formats (existing logic)
-                for match in matches:
-                    if len(match) == 2:
-                        if ':' in match[0]:  # timestamp first
-                            time_str, word = match
-                        else:  # word first
-                            word, time_str = match
-                        
-                        # Convert timestamp to seconds
-                        try:
-                            if '.' in time_str:
-                                minutes, seconds = time_str.split(':')
-                                total_seconds = int(minutes) * 60 + float(seconds)
-                            else:
-                                total_seconds = float(time_str)
-                            
-                            word_timestamps.append({
-                                'word': word.strip(),
-                                'timestamp': segment_offset_seconds + total_seconds
-                            })
-                        except ValueError:
-                            continue
-            break  # Use first pattern that matches
-    
-    if word_timestamps:
-        # Process timestamped segments from Mistral
-        if 'start_timestamp' in word_timestamps[0]:  # Mistral format with segments
-            logging.info(f"Processing {len(word_timestamps)} timestamped segments from Mistral")
-            
-            for i, segment_data in enumerate(word_timestamps):
-                text = segment_data['text']
-                start_time = segment_data['start_timestamp']
-                end_time = segment_data['end_timestamp']
-                
-                # Always split segment text into words and create individual entries
-                words = text.split()
-                segment_duration = end_time - start_time
-                time_per_word = segment_duration / len(words) if words else 1.0
-                
-                for j, word in enumerate(words):
-                    # Calculate word timing with timestamp representing the middle of each word
-                    word_center = start_time + (j + 0.5) * time_per_word
-                    half_word_duration = time_per_word / 2
-                    
-                    word_start = word_center - half_word_duration
-                    word_end = word_center + half_word_duration
-                    
-                    # Ensure start time is not negative
-                    word_start = max(0, word_start)
-                    
-                    entries.append({
-                        'index': len(entries) + 1,
-                        'start_time': word_start,
-                        'end_time': word_end,
-                        'text': word
-                    })
-        
+                # Single word case - use reasonable default
+                end_time = middle_timestamp + 0.25  # 0.5s total duration
+
+        # Start time is calculated similarly for previous boundary
+        if i > 0:
+            prev_middle = word_timestamps[i - 1]['timestamp']
+            # Start time is halfway between previous word's middle and this word's middle
+            start_time = (prev_middle + middle_timestamp) / 2
         else:
-            # Handle other timestamp formats (existing word-level logic)
-            # NOTE: Timestamps from API indicate the MIDDLE of each word
-            for i, word_data in enumerate(word_timestamps):
-                word = word_data['word']
-                middle_timestamp = word_data['timestamp']
-                
-                # Calculate start and end times to avoid overlaps
-                if i < len(word_timestamps) - 1:
-                    next_middle = word_timestamps[i + 1]['timestamp']
-                    # End time is halfway between this word's middle and next word's middle
-                    end_time = (middle_timestamp + next_middle) / 2
-                else:
-                    # For last word, estimate duration based on previous word or use default
-                    if i > 0:
-                        prev_middle = word_timestamps[i - 1]['timestamp']
-                        word_duration = middle_timestamp - prev_middle
-                        end_time = middle_timestamp + word_duration / 2
-                    else:
-                        # Single word case - use reasonable default
-                        end_time = middle_timestamp + 0.25  # 0.5s total duration
-                
-                # Start time is calculated similarly for previous boundary
-                if i > 0:
-                    prev_middle = word_timestamps[i - 1]['timestamp']
-                    # Start time is halfway between previous word's middle and this word's middle
-                    start_time = (prev_middle + middle_timestamp) / 2
-                else:
-                    # For first word, calculate start based on end time and reasonable duration
-                    if i < len(word_timestamps) - 1:
-                        word_duration = end_time - middle_timestamp
-                        start_time = middle_timestamp - word_duration
-                    else:
-                        # Single word case
-                        start_time = middle_timestamp - 0.25  # 0.5s total duration
-                
-                # Ensure start time is not negative
-                start_time = max(0, start_time)
-                
-                # Create individual SRT entry for each word
-                entries.append({
-                    'index': i + 1,
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'text': word
-                })
-    
-    else:
-        # Fallback to sentence-based timing if no word-level timestamps found
-        logging.info("No word-level timestamps found, using sentence-based timing")
-        
-        if word_level:
-            # Create word-level entries by estimating timing
-            logging.info("Creating word-level SRT entries with estimated timing")
-            
-            # Split transcription into words
-            words = re.findall(r'\S+', transcription.strip())
-            
-            # Estimate timing: assume average speaking rate of 150 words per minute
-            words_per_second = 150 / 60  # ~2.5 words per second
-            seconds_per_word = 1 / words_per_second  # ~0.4 seconds per word
-            
-            for i, word in enumerate(words):
-                word_center = segment_offset_seconds + (i + 0.5) * seconds_per_word
-                half_word_duration = seconds_per_word / 2
-                
-                start_time = word_center - half_word_duration
-                end_time = word_center + half_word_duration
-                
-                # Ensure start time is not negative
-                start_time = max(0, start_time)
-                
-                entries.append({
-                    'index': i + 1,
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'text': word
-                })
-        else:
-            # Split transcription into sentences/phrases
-            sentences = re.split(r'[.!?]+', transcription.strip())
-            sentences = [s.strip() for s in sentences if s.strip()]
-            
-            # Estimate timing (this is basic - 3 seconds per sentence)
-            for i, sentence in enumerate(sentences):
-                start_time = segment_offset_seconds + (i * 3)
-                end_time = segment_offset_seconds + ((i + 1) * 3)
-                
-                entries.append({
-                    'index': i + 1,
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'text': sentence
-                })
-    
+            # For first word, calculate start based on end time and reasonable duration
+            if i < len(word_timestamps) - 1:
+                word_duration = end_time - middle_timestamp
+                start_time = middle_timestamp - word_duration
+            else:
+                # Single word case
+                start_time = middle_timestamp - 0.25  # 0.5s total duration
+
+        # Ensure start time is not negative
+        start_time = max(0, start_time)
+
+        # Create individual SRT entry for each word
+        entries.append({
+            'index': i + 1,
+            'start_time': start_time,
+            'end_time': end_time,
+            'text': word
+        })
+
     return entries
 
 
@@ -488,7 +343,6 @@ def join_srt_files_with_overlap(srt_files: Dict[int, str], segment_info: Dict[in
                 
             try:
                 # Parse SRT block
-                index = int(lines[0])
                 timestamp_line = lines[1]
                 text = '\n'.join(lines[2:])
                 
@@ -598,70 +452,41 @@ def srt_to_json(srt_file_path: str) -> Dict[str, Any]:
     
     # If entries are word-level (short text), group them into meaningful segments
     # Otherwise treat each entry as a segment
-    if srt_entries and len(srt_entries[0]['text'].split()) <= 2:
-        # Word-level entries - group into segments
-        segment_gap_threshold = 2.0  # seconds gap to start new segment
+    # Word-level entries - group into segments
+    segment_gap_threshold = 2.0  # seconds gap to start new segment
+
+    for i, entry in enumerate(srt_entries):
+        # Check if we should start a new segment
+        if (current_segment['start'] is not None and
+            entry['start_time'] - current_segment['end'] > segment_gap_threshold):
+            # Finalize current segment
+            if current_segment['words']:
+                segments.append(current_segment.copy())
+                current_segment = {
+                    'text': '',
+                    'start': None,
+                    'end': None,
+                    'words': [],
+                    'id': len(segments)
+                }
+
+        # Add word to current segment
+        if current_segment['start'] is None:
+            current_segment['start'] = entry['start_time']
+
+        current_segment['end'] = entry['end_time']
+        current_segment['text'] += (' ' if current_segment['text'] else '') + entry['text']
+        current_segment['words'].append({
+            'text': entry['text'],
+            'start': entry['start_time'],
+            'end': entry['end_time']
+        })
         
-        for i, entry in enumerate(srt_entries):
-            # Check if we should start a new segment
-            if (current_segment['start'] is not None and 
-                entry['start_time'] - current_segment['end'] > segment_gap_threshold):
-                # Finalize current segment
-                if current_segment['words']:
-                    segments.append(current_segment.copy())
-                    current_segment = {
-                        'text': '',
-                        'start': None,
-                        'end': None,
-                        'words': [],
-                        'id': len(segments)
-                    }
-            
-            # Add word to current segment
-            if current_segment['start'] is None:
-                current_segment['start'] = entry['start_time']
-            
-            current_segment['end'] = entry['end_time']
-            current_segment['text'] += (' ' if current_segment['text'] else '') + entry['text']
-            current_segment['words'].append({
-                'text': entry['text'],
-                'start': entry['start_time'],
-                'end': entry['end_time']
-            })
-        
-        # Add final segment
-        if current_segment['words']:
-            segments.append(current_segment)
+    # Add final segment
+    if current_segment['words']:
+        segments.append(current_segment)
     
-    else:
-        # Sentence/phrase-level entries - each entry becomes a segment
-        for i, entry in enumerate(srt_entries):
-            # Split text into words and estimate word timing
-            words = entry['text'].split()
-            if not words:
-                continue
-                
-            segment_duration = entry['end_time'] - entry['start_time']
-            time_per_word = segment_duration / len(words) if words else 0
-            
-            word_list = []
-            for j, word in enumerate(words):
-                word_start = entry['start_time'] + j * time_per_word
-                word_end = entry['start_time'] + (j + 1) * time_per_word
-                word_list.append({
-                    'text': word,
-                    'start': round(word_start, 3),  # Use more precision to avoid timing conflicts
-                    'end': round(word_end, 3)
-                })
-            
-            segments.append({
-                'text': entry['text'],
-                'start': entry['start_time'],
-                'end': entry['end_time'],
-                'words': word_list,
-                'id': i
-            })
-    
+
     return {
         'text': full_text,
         'segments': segments
@@ -690,3 +515,12 @@ def convert_srt_to_json(srt_file_path: str, output_path: str) -> bool:
     except Exception as e:
         logging.error(f"Error converting SRT to JSON: {e}")
         return False
+
+# Convert Mistral timestamp format to seconds
+def parse_mistral_time(time_str):
+    # Parse format like "0m3s34ms" or "1m23s456ms"
+    time_match = re.match(r'(\d+)m(\d+)s(\d+)ms', time_str)
+    if time_match:
+        minutes, seconds, milliseconds = map(int, time_match.groups())
+        return minutes * 60 + seconds + milliseconds / 1000.0
+    return 0
