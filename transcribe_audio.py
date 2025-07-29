@@ -12,15 +12,11 @@ import requests
 from pathlib import Path
 from typing import Dict, Any, List
 import tempfile
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
-
-# Optional: pedalboard for audio manipulation
-try:
-    from pedalboard import Pedalboard, Reverb, Compressor, Resample
-    from pedalboard.io import AudioFile
-    import numpy as np
-except ImportError:
-    raise ImportError("pedalboard is required for audio preprocessing")
+from pedalboard.io import AudioFile
+import time
 
 
 class SRTFormatter:
@@ -41,6 +37,30 @@ class SRTFormatter:
         start_formatted = SRTFormatter.format_time(start_time)
         end_formatted = SRTFormatter.format_time(end_time)
         return f"{index}\n{start_formatted} --> {end_formatted}\n{text}\n\n"
+    
+    @staticmethod
+    def parse_time(time_str: str) -> float:
+        """Parse SRT time format (HH:MM:SS,mmm) to seconds"""
+        time_str = time_str.strip()
+        # Handle both comma and dot as decimal separator
+        time_str = time_str.replace(',', '.')
+        
+        # Split into time and milliseconds parts
+        if '.' in time_str:
+            time_part, ms_part = time_str.split('.')
+            milliseconds = float('0.' + ms_part)
+        else:
+            time_part = time_str
+            milliseconds = 0.0
+        
+        # Parse HH:MM:SS
+        parts = time_part.split(':')
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds = int(parts[2])
+        
+        total_seconds = hours * 3600 + minutes * 60 + seconds + milliseconds
+        return total_seconds
 
 
 class AudioConverter:
@@ -170,6 +190,18 @@ class AudioSplitter:
                 
                 segment_audio = audio[:, start_sample:end_sample]
                 
+                # Handle channel conversion to mono (same logic as AudioConverter)
+                num_channels = segment_audio.shape[0]
+                if num_channels == 1:
+                    # Already mono
+                    processed_segment_audio = segment_audio
+                elif num_channels == 2:
+                    # Stereo to mono: average the two channels
+                    processed_segment_audio = np.mean(segment_audio[:2], axis=0, keepdims=True)
+                else:
+                    # Multiple channels: use first two and downmix to mono
+                    processed_segment_audio = np.mean(segment_audio[:2], axis=0, keepdims=True)
+                
                 segment_filename = f"segment_{i+1:03d}.mp3"
                 segment_path = os.path.join(output_dir, segment_filename)
                 
@@ -177,7 +209,7 @@ class AudioSplitter:
                 final_sample_rate = sample_rate
                 
                 with AudioFile(segment_path, 'w', final_sample_rate, 1) as f:
-                    f.write(segment_audio)
+                    f.write(processed_segment_audio)
                 
                 # Check segment file size
                 segment_size_mb = os.path.getsize(segment_path) / (1024 * 1024)
@@ -260,9 +292,11 @@ class MistralAudioTranscriber:
         print("Signed URL retrieved successfully")
         return signed_url
     
-    def transcribe_audio(self, signed_url: str, custom_prompt: str = "Transcribe the attached audio. Keep the transcript as exact as possible. Provide word level timestamps.") -> str:
+    def transcribe_audio(self, signed_url: str, custom_prompt: str = "Transcribe the attached audio. Keep the transcript as exact as possible. Provide word level timestamps.", store_results: bool = False, results_dir: str = None, segment_name: str = None) -> str:
         """Send transcription request to Mistral API"""
         print("Sending transcription request...")
+
+        custom_prompt = custom_prompt + " Here is an example of how the output should look like: `Word1 [ 0m0s694ms ] Word2 [ 0m1s164ms ] word3 [ 0m1s314ms ]`"
         
         url = f"{self.base_url}/chat/completions"
         
@@ -308,6 +342,37 @@ class MistralAudioTranscriber:
         transcription = result['choices'][0]['message']['content']
         print("Transcription completed successfully")
         
+        # Store API results if requested
+        if store_results and results_dir and segment_name:
+            try:
+                # Store raw JSON response
+                json_filename = f"{segment_name}_api_response.json"
+                json_path = os.path.join(results_dir, json_filename)
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    import json
+                    json.dump(result, f, indent=2, ensure_ascii=False)
+                print(f"Stored API response: {json_path}")
+                
+                # Store transcription text
+                txt_filename = f"{segment_name}_transcription.txt"
+                txt_path = os.path.join(results_dir, txt_filename)
+                with open(txt_path, 'w', encoding='utf-8') as f:
+                    f.write(transcription)
+                print(f"Stored transcription: {txt_path}")
+                
+                # Store request payload for reference
+                req_filename = f"{segment_name}_request.json"
+                req_path = os.path.join(results_dir, req_filename)
+                with open(req_path, 'w', encoding='utf-8') as f:
+                    # Remove the signed URL from payload for security
+                    safe_payload = payload.copy()
+                    safe_payload['messages'][0]['content'][0]['input_audio']['data'] = "[SIGNED_URL_REDACTED]"
+                    json.dump(safe_payload, f, indent=2, ensure_ascii=False)
+                print(f"Stored request payload: {req_path}")
+                
+            except Exception as e:
+                print(f"Warning: Failed to store API results: {e}")
+        
         # Debug: Show raw transcription output
         print("\n" + "="*50)
         print("DEBUG: Raw transcription from model:")
@@ -316,19 +381,81 @@ class MistralAudioTranscriber:
         print("="*50 + "\n")
         
         return transcription
-    
-    def transcribe_segment(self, audio_path: str, language: str = None) -> str:
-        """Complete transcription workflow for a single audio segment"""
+
+    def transcribe_segment(self, audio_path: str, language: str = None, store_results: bool = False, results_dir: str = None, segment_name: str = None, max_retries: int = 3) -> str:
+        """Complete transcription workflow for a single audio segment with retry logic for missing timestamps"""
+        print(f"Processing audio file: {audio_path}")
+        
+        # Upload audio file
         file_id = self.upload_audio_file(audio_path)
+        print(f"File uploaded with ID: {file_id}")
+        
+        # Get signed URL
         signed_url = self.get_signed_url(file_id)
+        print(f"Got signed URL for file")
         
+        # Prepare custom prompt
+        prompt = "Transcribe the attached audio. Keep the transcript as exact as possible. Provide word level timestamps."
         if language:
-            custom_prompt = f"Transcribe the attached audio. Keep the transcript as exact as possible. Assume {language} language. Provide word level timestamps."
-        else:
-            custom_prompt = "Transcribe the attached audio. Keep the transcript as exact as possible. Provide word level timestamps."
+            prompt += f" The audio is in {language}."
         
-        transcription = self.transcribe_audio(signed_url, custom_prompt)
-        return transcription
+        # Retry logic for missing timestamps
+        for attempt in range(max_retries):
+            try:
+                print(f"Transcription attempt {attempt + 1}/{max_retries}")
+                
+                # Get transcription
+                transcription = self.transcribe_audio(
+                    signed_url, 
+                    prompt, 
+                    store_results, 
+                    results_dir, 
+                    f"{segment_name}_attempt_{attempt + 1}" if segment_name else None
+                )
+                
+                # Check if timestamps are present
+                if has_timestamps(transcription):
+                    print(f"✓ Timestamps detected in transcription (attempt {attempt + 1})")
+                    return transcription
+                else:
+                    print(f"⚠ No timestamps detected in transcription (attempt {attempt + 1})")
+                    
+                    if attempt < max_retries - 1:
+                        print(f"Retrying in 2 seconds...")
+                        time.sleep(2)  # Brief delay before retry
+                    else:
+                        print(f"⚠ All {max_retries} attempts failed to produce timestamps. Using transcription without timestamps.")
+                        return transcription
+                        
+            except Exception as e:
+                print(f"Error in transcription attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    print(f"Retrying in 5 seconds...")
+                    time.sleep(5)  # Longer delay after error
+                else:
+                    print(f"All {max_retries} attempts failed.")
+                    raise
+        
+        return transcription  # Fallback (should not reach here)
+
+
+def has_timestamps(transcription: str) -> bool:
+    """
+    Detect if transcription contains timestamps.
+    Returns True if timestamps are found, False otherwise.
+    """
+    timestamp_patterns = [
+        r'\[\s*\d+m\d+s\d+ms\s*\]',  # Mistral format: [ 0m1s122ms ]
+        r'\[\s*\d+m\d+s\d+ms\s*-\s*\d+m\d+s\d+ms\s*\]',  # Mistral range format: [ 0m0s694ms - 0m3s34ms ]
+        r'\[\d{1,2}:\d{2}\.\d{2}\]',  # [00:01.23] format
+        r'\d+:\d{2}\.\d{2}',  # Simple timestamp format
+    ]
+    
+    for pattern in timestamp_patterns:
+        if re.search(pattern, transcription):
+            return True
+    
+    return False
 
 
 def process_transcription_to_srt(transcription: str, segment_offset_seconds: float = 0, word_level: bool = False) -> List[Dict]:
@@ -515,6 +642,84 @@ def process_transcription_to_srt(transcription: str, segment_offset_seconds: flo
     return entries
 
 
+def join_srt_files_with_overlap(srt_files: Dict[int, str], segment_info: Dict[int, Dict], keep_segments: bool) -> List[Dict]:
+    """Join SRT files from segments with overlap handling"""
+    all_srt_entries: List[Dict] = []
+    
+    # Process segments in order
+    for i in sorted(srt_files.keys()):
+        srt_path = srt_files[i]
+        segment = segment_info[i]
+        
+        print(f"Processing SRT file for segment {i+1}: {srt_path}")
+        
+        with open(srt_path, 'r', encoding='utf-8') as f:
+            srt_content = f.read().strip()
+        
+        if not srt_content:
+            continue
+            
+        # Parse SRT entries
+        srt_blocks = srt_content.split('\n\n')
+        for block in srt_blocks:
+            if not block.strip():
+                continue
+                
+            lines = block.strip().split('\n')
+            if len(lines) < 3:
+                continue
+                
+            try:
+                # Parse SRT block
+                index = int(lines[0])
+                timestamp_line = lines[1]
+                text = '\n'.join(lines[2:])
+                
+                # Parse timestamps
+                start_str, end_str = timestamp_line.split(' --> ')
+                start_time = SRTFormatter.parse_time(start_str)
+                end_time = SRTFormatter.parse_time(end_str)
+                
+                # Apply segment time offset to get global timestamps
+                global_start_time = start_time + segment['start_time']
+                global_end_time = end_time + segment['start_time']
+                
+                # Handle overlap filtering
+                if segment['overlap_start'] > 0:
+                    # Skip entries that fall within the overlap region at the beginning of this segment
+                    overlap_end_time = segment['start_time'] + segment['overlap_start']
+                    if global_start_time <= overlap_end_time:
+                        print(f"  Skipping overlapped entry: {global_start_time:.2f}s <= {overlap_end_time:.2f}s")
+                        continue
+                
+                # Add to final results with global indexing
+                all_srt_entries.append({
+                    'index': len(all_srt_entries) + 1,
+                    'start_time': global_start_time,
+                    'end_time': global_end_time,
+                    'text': text
+                })
+                
+            except (ValueError, IndexError) as e:
+                print(f"Warning: Failed to parse SRT block: {e}")
+                continue
+    
+    print(f"Joined {len(all_srt_entries)} total SRT entries from {len(srt_files)} segments")
+    
+    # Clean up temporary SRT files if not keeping segments
+    if not keep_segments:
+        for srt_path in srt_files.values():
+            try:
+                os.remove(srt_path)
+                print(f"Removed temporary SRT file: {srt_path}")
+            except OSError as e:
+                print(f"Warning: Failed to remove {srt_path}: {e}")
+    else:
+        print(f"Keeping segment SRT files (--keep-segments enabled)")
+    
+    return all_srt_entries
+
+
 def main():
     parser = argparse.ArgumentParser(description='Transcribe audio files using Mistral AI API')
     
@@ -530,6 +735,9 @@ def main():
     parser.add_argument('--keep-converted', action='store_true', help='Keep converted MP3 file after processing')
     parser.add_argument('--language', help='Expected language of the audio (e.g., "Norwegian", "German"). If not specified, uses generic original language prompt.')
     parser.add_argument('--word-level', action='store_true', help='Generate word-level SRT entries (one entry per word)')
+    parser.add_argument('--store-api-results', action='store_true', help='Store API call results as files for debugging/caching')
+    parser.add_argument('--parallel-workers', type=int, default=3, help='Number of parallel workers for API requests (default: 3)')
+    parser.add_argument('--max-retries', type=int, default=3, help='Maximum number of retry attempts for missing timestamps (default: 3)')
     
     args = parser.parse_args()
     
@@ -554,12 +762,23 @@ def main():
     
     # Initialize components
     transcriber = MistralAudioTranscriber(api_key)
-    splitter = AudioSplitter(max_duration_minutes=25, overlap_seconds=30)
+    splitter = AudioSplitter(max_duration_minutes=1, overlap_seconds=30)
+
     converter = AudioConverter()
     
     # Create temporary directory for segments
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
+            # Create API results directory if storing results
+            api_results_dir = None
+            if args.store_api_results:
+                # Create results directory next to output file
+                output_dir = os.path.dirname(os.path.abspath(args.output))
+                base_name = Path(args.audio_file).stem
+                api_results_dir = os.path.join(output_dir, f"{base_name}_api_results")
+                os.makedirs(api_results_dir, exist_ok=True)
+                print(f"API results will be stored in: {api_results_dir}")
+            
             # Convert input file to MP3 if necessary
             converted_path = None
             if converter.needs_conversion(args.audio_file):
@@ -572,37 +791,61 @@ def main():
             # Split audio if necessary
             segments = splitter.split_audio(input_path, temp_dir)
             
-            all_srt_entries = []
-            
-            # Process each segment
-            for i, segment in enumerate(segments):
-                print(f"\nProcessing segment {i+1}/{len(segments)}")
+            # Process segments in parallel while maintaining order
+            def process_segment(segment_info):
+                """Process a single segment and return results with segment info"""
+                i, segment = segment_info
+                print(f"Starting transcription for segment {i+1}/{len(segments)}")
                 
                 # Transcribe segment
-                transcription = transcriber.transcribe_segment(segment['path'], args.language)
+                transcription = transcriber.transcribe_segment(
+                    segment['path'], 
+                    args.language, 
+                    args.store_api_results, 
+                    api_results_dir, 
+                    f"segment_{i+1:03d}",
+                    args.max_retries
+                )
                 
-                # For overlapping segments, we need to calculate the effective start time
-                # First segment: use actual start time (0)
-                # Subsequent segments: use start time + overlap to skip the overlapping part
-                if i == 0:
-                    effective_start_time = segment['start_time']
-                else:
-                    effective_start_time = segment['start_time'] + segment['overlap_start']
+                # Convert to SRT entries with NO time offset (segment-local timestamps)
+                srt_entries = process_transcription_to_srt(transcription, 0, args.word_level)
                 
-                # Convert to SRT entries using the effective start time
-                srt_entries = process_transcription_to_srt(transcription, effective_start_time, args.word_level)
+                # Generate individual SRT file for this segment
+                segment_srt_filename = f"segment_{i+1:03d}.srt"
+                segment_srt_path = os.path.join(temp_dir, segment_srt_filename)
                 
-                # For segments with overlap, we need to filter out entries that fall within the overlap region
-                if segment['overlap_start'] > 0:
-                    # Remove entries that fall within the overlap at the beginning
-                    overlap_end_time = segment['start_time'] + segment['overlap_start']
-                    srt_entries = [entry for entry in srt_entries if entry['start_time'] >= overlap_end_time]
+                with open(segment_srt_path, 'w', encoding='utf-8') as f:
+                    for j, entry in enumerate(srt_entries):
+                        srt_text = SRTFormatter.create_srt_entry(
+                            j + 1,  # Local indexing for this segment
+                            entry['start_time'],
+                            entry['end_time'],
+                            entry['text']
+                        )
+                        f.write(srt_text)
                 
-                # Adjust indices for global numbering
-                for entry in srt_entries:
-                    entry['index'] = len(all_srt_entries) + 1
-                    all_srt_entries.append(entry)
-
+                print(f"Completed transcription for segment {i+1}/{len(segments)} -> {segment_srt_filename}")
+                return i, segment_srt_path, segment
+            
+            # Submit all segment processing tasks
+            with ThreadPoolExecutor(max_workers=args.parallel_workers) as executor:
+                # Create futures with segment index and data
+                future_to_index = {}
+                for i, segment in enumerate(segments):
+                    future = executor.submit(process_segment, (i, segment))
+                    future_to_index[future] = i
+                
+                # Collect results maintaining order
+                segment_srt_files = {}
+                segment_info = {}
+                for future in as_completed(future_to_index):
+                    segment_index, srt_path, segment = future.result()
+                    segment_srt_files[segment_index] = srt_path
+                    segment_info[segment_index] = segment
+                
+                # Join SRT files with overlap handling
+                all_srt_entries = join_srt_files_with_overlap(segment_srt_files, segment_info, args.keep_segments)
+            
             # Generate SRT file
             with open(args.output, 'w', encoding='utf-8') as f:
                 for entry in all_srt_entries:
