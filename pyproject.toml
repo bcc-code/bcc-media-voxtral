@@ -1,0 +1,15 @@
+[project]
+name = "transcribe-api"
+version = "0.1.0"
+description = "Transcribe API using Mistral AI API"
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=2.3.3",
+    "librosa>=0.10.1",
+    "numpy>=1.24.3",
+    "pedalboard>=0.9.17",
+    "psutil>=7.0.0",
+    "requests>=2.32.4",
+    "scipy>=1.11.2",
+]
+
