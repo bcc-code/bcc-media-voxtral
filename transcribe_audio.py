@@ -23,6 +23,17 @@ class MistralAudioTranscriber:
             "Accept": "application/json"
         }
     
+    def _handle_http_error(self, response):
+        """Handle HTTP errors with detailed logging and re-raise the exception."""
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            logging.error(f"HTTP Error: {e}")
+            logging.error(f"Response status code: {response.status_code}")
+            logging.error(f"Response headers: {response.headers}")
+            logging.error(f"Response body: {response.text}")
+            raise
+    
     def upload_audio_file(self, audio_path: str) -> str:
         """Upload audio file to Mistral API and return file ID"""
         logging.info(f"Uploading audio file: {os.path.basename(audio_path)}")
@@ -38,14 +49,7 @@ class MistralAudioTranscriber:
             
             response = requests.post(url, headers=headers, files=files)
             
-            try:
-                response.raise_for_status()
-            except requests.exceptions.HTTPError as e:
-                logging.error(f"HTTP Error: {e}")
-                logging.error(f"Response status code: {response.status_code}")
-                logging.error(f"Response headers: {response.headers}")
-                logging.error(f"Response body: {response.text}")
-                raise
+            self._handle_http_error(response)
             
             result = response.json()
             file_id = result.get('id')
@@ -60,14 +64,7 @@ class MistralAudioTranscriber:
         
         response = requests.get(url, headers=self.headers)
         
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            logging.error(f"HTTP Error: {e}")
-            logging.error(f"Response status code: {response.status_code}")
-            logging.error(f"Response headers: {response.headers}")
-            logging.error(f"Response body: {response.text}")
-            raise
+        self._handle_http_error(response)
         
         result = response.json()
         signed_url = result.get('url')
@@ -111,14 +108,7 @@ class MistralAudioTranscriber:
         
         response = requests.post(url, headers=headers, json=payload)
         
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            logging.error(f"HTTP Error: {e}")
-            logging.error(f"Response status code: {response.status_code}")
-            logging.error(f"Response headers: {response.headers}")
-            logging.error(f"Response body: {response.text}")
-            raise
+        self._handle_http_error(response)
         
         result = response.json()
         transcription = result['choices'][0]['message']['content']
