@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 from pedalboard.io import AudioFile
 import time
+import json
 
 
 class SRTFormatter:
@@ -698,7 +699,7 @@ def join_srt_files_with_overlap(srt_files: Dict[int, str], segment_info: Dict[in
         print(f"Processing SRT file for segment {i+1}: {srt_path}")
         
         with open(srt_path, 'r', encoding='utf-8') as f:
-            srt_content = f.read().strip()
+            srt_content = f.read()
         
         if not srt_content:
             continue
@@ -764,45 +765,209 @@ def join_srt_files_with_overlap(srt_files: Dict[int, str], segment_info: Dict[in
     return all_srt_entries
 
 
+def srt_to_json(srt_file_path: str) -> Dict[str, Any]:
+    """
+    Convert SRT file to JSON format with segments and word-level timing.
+    
+    Args:
+        srt_file_path: Path to the SRT file
+        
+    Returns:
+        Dictionary in the specified JSON format with text, segments, and word timing
+    """
+    if not os.path.exists(srt_file_path):
+        raise FileNotFoundError(f"SRT file not found: {srt_file_path}")
+    
+    with open(srt_file_path, 'r', encoding='utf-8') as f:
+        srt_content = f.read()
+    
+    # Parse SRT entries
+    srt_entries = []
+    entries = srt_content.strip().split('\n\n')
+    
+    for entry in entries:
+        lines = entry.strip().split('\n')
+        if len(lines) >= 3:
+            try:
+                # Parse SRT block
+                index = int(lines[0])
+                time_line = lines[1]
+                text = '\n'.join(lines[2:])
+                
+                # Parse timing
+                start_str, end_str = time_line.split(' --> ')
+                start_time = SRTFormatter.parse_time(start_str)
+                end_time = SRTFormatter.parse_time(end_str)
+                
+                srt_entries.append({
+                    'index': index,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'text': text
+                })
+            except (ValueError, IndexError):
+                continue
+    
+    if not srt_entries:
+        return {"text": "", "segments": []}
+    
+    # Combine all text
+    full_text = ' '.join(entry['text'] for entry in srt_entries)
+    
+    # Group entries into segments based on timing gaps or sentence boundaries
+    segments = []
+    current_segment = {
+        'text': '',
+        'start': None,
+        'end': None,
+        'words': [],
+        'id': 0
+    }
+    
+    # If entries are word-level (short text), group them into meaningful segments
+    # Otherwise treat each entry as a segment
+    if srt_entries and len(srt_entries[0]['text'].split()) <= 2:
+        # Word-level entries - group into segments
+        segment_gap_threshold = 2.0  # seconds gap to start new segment
+        
+        for i, entry in enumerate(srt_entries):
+            # Check if we should start a new segment
+            if (current_segment['start'] is not None and 
+                entry['start_time'] - current_segment['end'] > segment_gap_threshold):
+                # Finalize current segment
+                if current_segment['words']:
+                    segments.append(current_segment.copy())
+                    current_segment = {
+                        'text': '',
+                        'start': None,
+                        'end': None,
+                        'words': [],
+                        'id': len(segments)
+                    }
+            
+            # Add word to current segment
+            if current_segment['start'] is None:
+                current_segment['start'] = entry['start_time']
+            
+            current_segment['end'] = entry['end_time']
+            current_segment['text'] += (' ' if current_segment['text'] else '') + entry['text']
+            current_segment['words'].append({
+                'text': entry['text'],
+                'start': entry['start_time'],
+                'end': entry['end_time']
+            })
+        
+        # Add final segment
+        if current_segment['words']:
+            segments.append(current_segment)
+    
+    else:
+        # Sentence/phrase-level entries - each entry becomes a segment
+        for i, entry in enumerate(srt_entries):
+            # Split text into words and estimate word timing
+            words = entry['text'].split()
+            if not words:
+                continue
+                
+            segment_duration = entry['end_time'] - entry['start_time']
+            time_per_word = segment_duration / len(words) if words else 0
+            
+            word_list = []
+            for j, word in enumerate(words):
+                word_start = entry['start_time'] + j * time_per_word
+                word_end = entry['start_time'] + (j + 1) * time_per_word
+                word_list.append({
+                    'text': word,
+                    'start': round(word_start, 3),  # Use more precision to avoid timing conflicts
+                    'end': round(word_end, 3)
+                })
+            
+            segments.append({
+                'text': entry['text'],
+                'start': entry['start_time'],
+                'end': entry['end_time'],
+                'words': word_list,
+                'id': i
+            })
+    
+    return {
+        'text': full_text,
+        'segments': segments
+    }
+
+
+def convert_srt_to_json(srt_file_path: str, output_path: str) -> bool:
+    """
+    Convert SRT file to JSON format with segments and word-level timing.
+    
+    Args:
+        srt_file_path: Path to the SRT file
+        output_path: Path to the output JSON file
+        
+    Returns:
+        True if conversion is successful, False otherwise
+    """
+    try:
+        json_data = srt_to_json(srt_file_path)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+        print(f"SRT file converted to JSON successfully!")
+        print(f"Input: {srt_file_path}")
+        print(f"Output: {output_path}")
+        return True
+    except Exception as e:
+        print(f"Error converting SRT to JSON: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description='Transcribe audio files using Mistral AI API')
     
-    # Get supported formats for help text
-    supported_formats = AudioConverter.get_supported_formats()
-    formats_text = ', '.join(supported_formats)
-    
-    parser.add_argument('audio_file', 
-                       help=f'Path to the audio/video file to transcribe. Supported formats: {formats_text}')
-    parser.add_argument('-o', '--output', help='Output SRT file path', default='transcription.srt')
-    parser.add_argument('--api-key', help='Mistral API key (or set MISTRAL_API_KEY env var)')
-    parser.add_argument('--keep-segments', action='store_true', help='Keep audio segments after processing')
-    parser.add_argument('--keep-converted', action='store_true', help='Keep converted MP3 file after processing')
-    parser.add_argument('--language', help='Expected language of the audio (e.g., "Norwegian", "German"). If not specified, uses generic original language prompt.')
-    parser.add_argument('--word-level', action='store_true', help='Generate word-level SRT entries (one entry per word)')
-    parser.add_argument('--store-api-results', action='store_true', help='Store API call results as files for debugging/caching')
+    parser.add_argument('input_file', help='Input audio file path or SRT file path (for --convert-srt mode)')
+    parser.add_argument('--output', '-o', help='Output SRT file path (default: input_file.srt)')
+    parser.add_argument('--language', help='Language code for transcription (optional)')
+    parser.add_argument('--custom-prompt', help='Custom prompt for transcription')
     parser.add_argument('--parallel-workers', type=int, default=3, help='Number of parallel workers for API requests (default: 3)')
-    parser.add_argument('--max-retries', type=int, default=3, help='Maximum number of retry attempts for missing timestamps (default: 3)')
+    parser.add_argument('--max-retries', type=int, default=3, help='Maximum retries for missing timestamps (default: 3)')
+    parser.add_argument('--store-api-results', action='store_true', help='Store API call results as files for debugging')
+    parser.add_argument('--keep-segments', action='store_true', help='Keep individual segment SRT files for debugging')
+    parser.add_argument('--to-json', action='store_true', help='Convert SRT output to JSON format with segments and word timing')
+    parser.add_argument('--convert-srt', action='store_true', help='Convert existing SRT file to JSON format (no transcription)')
     
     args = parser.parse_args()
     
+    # Handle SRT to JSON conversion mode
+    if args.convert_srt:
+        if not args.input_file.endswith('.srt'):
+            print("Error: --convert-srt mode requires an SRT file as input")
+            return False
+        
+        if not os.path.exists(args.input_file):
+            print(f"Error: SRT file not found: {args.input_file}")
+            return False
+        
+        json_output_path = args.output if args.output else args.input_file.replace('.srt', '.json')
+        return convert_srt_to_json(args.input_file, json_output_path)
+    
     # Get API key
-    api_key = args.api_key or os.getenv('MISTRAL_API_KEY')
+    api_key = os.getenv('MISTRAL_API_KEY')
     if not api_key:
-        print("Error: Mistral API key not provided. Use --api-key or set MISTRAL_API_KEY environment variable.")
+        print("Error: Mistral API key not provided. Use MISTRAL_API_KEY environment variable.")
         sys.exit(1)
     
     # Validate input file
-    if not os.path.exists(args.audio_file):
-        print(f"Error: Audio file not found: {args.audio_file}")
+    if not os.path.exists(args.input_file):
+        print(f"Error: Audio file not found: {args.input_file}")
         sys.exit(1)
     
     # Check if file format is supported
-    file_ext = Path(args.audio_file).suffix.lower()
-    if file_ext not in AudioConverter.get_supported_formats():
-        print(f"Error: Unsupported file format '{file_ext}'. Supported formats: {formats_text}")
+    file_ext = Path(args.input_file).suffix.lower()
+    supported_formats = AudioConverter.get_supported_formats()
+    if file_ext not in supported_formats:
+        print(f"Error: Unsupported file format '{file_ext}'. Supported formats: {', '.join(supported_formats)}")
         sys.exit(1)
     
-    print(f"Starting transcription of: {args.audio_file}")
+    print(f"Starting transcription of: {args.input_file}")
     
     # Initialize components
     transcriber = MistralAudioTranscriber(api_key)
@@ -818,19 +983,19 @@ def main():
             if args.store_api_results:
                 # Create results directory next to output file
                 output_dir = os.path.dirname(os.path.abspath(args.output))
-                base_name = Path(args.audio_file).stem
+                base_name = Path(args.input_file).stem
                 api_results_dir = os.path.join(output_dir, f"{base_name}_api_results")
                 os.makedirs(api_results_dir, exist_ok=True)
                 print(f"API results will be stored in: {api_results_dir}")
             
             # Convert input file to MP3 if necessary
             converted_path = None
-            if converter.needs_conversion(args.audio_file):
+            if converter.needs_conversion(args.input_file):
                 converted_path = os.path.join(temp_dir, 'converted.mp3')
-                converter.convert_to_mp3(args.audio_file, converted_path)
+                converter.convert_to_mp3(args.input_file, converted_path)
                 input_path = converted_path
             else:
-                input_path = args.audio_file
+                input_path = args.input_file
             
             # Split audio if necessary
             segments = splitter.split_audio(input_path, temp_dir)
@@ -852,7 +1017,7 @@ def main():
                 )
                 
                 # Convert to SRT entries with NO time offset (segment-local timestamps)
-                srt_entries = process_transcription_to_srt(transcription, 0, args.word_level)
+                srt_entries = process_transcription_to_srt(transcription, 0, False)
                 
                 # Generate individual SRT file for this segment
                 segment_srt_filename = f"segment_{i+1:03d}.srt"
@@ -891,7 +1056,8 @@ def main():
                 all_srt_entries = join_srt_files_with_overlap(segment_srt_files, segment_info, args.keep_segments)
             
             # Generate SRT file
-            with open(args.output, 'w', encoding='utf-8') as f:
+            output_path = args.output
+            with open(output_path, 'w', encoding='utf-8') as f:
                 for entry in all_srt_entries:
                     srt_text = SRTFormatter.create_srt_entry(
                         entry['index'],
@@ -901,12 +1067,23 @@ def main():
                     )
                     f.write(srt_text)
             
+            # Convert to JSON if requested
+            if args.to_json:
+                json_output_path = output_path.replace('.srt', '.json')
+                try:
+                    json_data = srt_to_json(output_path)
+                    with open(json_output_path, 'w', encoding='utf-8') as f:
+                        json.dump(json_data, f, ensure_ascii=False, indent=2)
+                    print(f"JSON output saved to: {json_output_path}")
+                except Exception as e:
+                    print(f"Error converting to JSON: {e}")
+            
             # Handle converted file cleanup
             if converted_path and args.keep_converted:
                 # Move converted file to output directory
                 final_converted_path = os.path.join(
                     os.path.dirname(args.output), 
-                    f"{Path(args.audio_file).stem}_converted.mp3"
+                    f"{Path(args.input_file).stem}_converted.mp3"
                 )
                 import shutil
                 shutil.copy2(converted_path, final_converted_path)

@@ -10,11 +10,20 @@ import os
 import tempfile
 from pathlib import Path
 import time
+import json
 
 # Add the current directory to the path so we can import transcribe_audio
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from transcribe_audio import process_transcription_to_srt, SRTFormatter, join_srt_files_with_overlap, has_timestamps, MistralAudioTranscriber
+from transcribe_audio import (
+    SRTFormatter, 
+    process_transcription_to_srt, 
+    join_srt_files_with_overlap, 
+    has_timestamps,
+    srt_to_json,
+    convert_srt_to_json,
+    MistralAudioTranscriber
+)
 
 
 class TestSRTFormatter(unittest.TestCase):
@@ -619,6 +628,249 @@ class TestRetryLogic(unittest.TestCase):
         # Verify different sleep times for error vs missing timestamps
         mock_sleep.assert_any_call(5)  # Error sleep
         mock_sleep.assert_any_call(2)  # Missing timestamp sleep
+
+
+class TestSRTToJSON(unittest.TestCase):
+    """Test SRT to JSON conversion functionality"""
+    
+    def setUp(self):
+        """Set up test fixtures"""
+        self.temp_dir = tempfile.mkdtemp()
+    
+    def tearDown(self):
+        """Clean up test fixtures"""
+        import shutil
+        shutil.rmtree(self.temp_dir)
+    
+    def create_test_srt_file(self, content: str, filename: str = "test.srt") -> str:
+        """Helper to create test SRT files"""
+        srt_path = os.path.join(self.temp_dir, filename)
+        with open(srt_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return srt_path
+    
+    def test_word_level_srt_to_json(self):
+        """Test conversion of word-level SRT to JSON format"""
+        srt_content = """1
+00:00:05,000 --> 00:00:07,240
+Forrettskjøl!
+
+2
+00:00:07,240 --> 00:00:07,660
+Du
+
+3
+00:00:07,660 --> 00:00:08,240
+erier
+
+4
+00:00:08,240 --> 00:00:08,640
+ass!
+
+5
+00:00:08,640 --> 00:00:09,420
+Det
+
+6
+00:00:09,420 --> 00:00:09,640
+var
+
+7
+00:00:09,640 --> 00:00:09,880
+helt
+
+8
+00:00:09,880 --> 00:00:10,260
+rått
+
+9
+00:00:10,260 --> 00:00:10,740
+ass!
+
+"""
+        srt_path = self.create_test_srt_file(srt_content)
+        result = srt_to_json(srt_path)
+        
+        # Check structure
+        self.assertIn('text', result)
+        self.assertIn('segments', result)
+        
+        # Check full text
+        expected_text = "Forrettskjøl! Du erier ass! Det var helt rått ass!"
+        self.assertEqual(result['text'], expected_text)
+        
+        # Check segments
+        self.assertEqual(len(result['segments']), 1)  # Should group into one segment
+        segment = result['segments'][0]
+        
+        self.assertEqual(segment['text'], expected_text)
+        self.assertEqual(segment['start'], 5.0)
+        self.assertEqual(segment['end'], 10.74)
+        self.assertEqual(segment['id'], 0)
+        
+        # Check words
+        self.assertEqual(len(segment['words']), 9)
+        first_word = segment['words'][0]
+        self.assertEqual(first_word['text'], 'Forrettskjøl!')
+        self.assertEqual(first_word['start'], 5.0)
+        self.assertEqual(first_word['end'], 7.24)
+    
+    def test_sentence_level_srt_to_json(self):
+        """Test conversion of sentence-level SRT to JSON format"""
+        srt_content = """1
+00:00:05,000 --> 00:00:10,740
+Forrettskjøl! Du erier ass! Det var helt rått ass!
+
+2
+00:00:10,740 --> 00:00:14,080
+Nå har vi bare en time å sove før
+
+3
+00:00:14,080 --> 00:00:15,920
+vi må reise. Ja ja, det er alt.
+
+"""
+        srt_path = self.create_test_srt_file(srt_content)
+        result = srt_to_json(srt_path)
+        
+        # Check structure
+        self.assertIn('text', result)
+        self.assertIn('segments', result)
+        
+        # Check segments
+        self.assertEqual(len(result['segments']), 3)
+        
+        # Check first segment
+        segment1 = result['segments'][0]
+        self.assertEqual(segment1['text'], 'Forrettskjøl! Du erier ass! Det var helt rått ass!')
+        self.assertEqual(segment1['start'], 5.0)
+        self.assertEqual(segment1['end'], 10.74)
+        self.assertEqual(len(segment1['words']), 9)  # Should split into words
+        
+        # Check word timing estimation - use more lenient checks
+        first_word = segment1['words'][0]
+        self.assertEqual(first_word['text'], 'Forrettskjøl!')
+        self.assertAlmostEqual(first_word['start'], 5.0, places=1)
+        
+        second_word = segment1['words'][1]
+        self.assertEqual(second_word['text'], 'Du')
+        # Check that second word starts after or at the same time as first word ends
+        self.assertGreaterEqual(second_word['start'], first_word['end'])
+    
+    def test_empty_srt_file(self):
+        """Test handling of empty SRT file"""
+        srt_path = self.create_test_srt_file("")
+        result = srt_to_json(srt_path)
+        
+        self.assertEqual(result['text'], "")
+        self.assertEqual(result['segments'], [])
+    
+    def test_malformed_srt_entries(self):
+        """Test handling of malformed SRT entries"""
+        srt_content = """1
+00:00:05,000 --> 00:00:07,240
+Valid entry
+
+invalid entry without timing
+
+3
+invalid timing format
+Another text
+
+4
+00:00:10,000 --> 00:00:12,000
+Another valid entry
+
+"""
+        srt_path = self.create_test_srt_file(srt_content)
+        result = srt_to_json(srt_path)
+        
+        # Should only process valid entries
+        self.assertEqual(len(result['segments']), 2)
+        self.assertIn('Valid entry', result['text'])
+        self.assertIn('Another valid entry', result['text'])
+    
+    def test_convert_srt_to_json_function(self):
+        """Test the standalone convert_srt_to_json function"""
+        srt_content = """1
+00:00:00,000 --> 00:00:02,000
+Test content
+
+"""
+        srt_path = self.create_test_srt_file(srt_content)
+        json_path = os.path.join(self.temp_dir, "output.json")
+        
+        # Test successful conversion
+        result = convert_srt_to_json(srt_path, json_path)
+        self.assertTrue(result)
+        self.assertTrue(os.path.exists(json_path))
+        
+        # Verify JSON content
+        with open(json_path, 'r', encoding='utf-8') as f:
+            json_data = json.load(f)
+        
+        self.assertEqual(json_data['text'], 'Test content')
+        self.assertEqual(len(json_data['segments']), 1)
+    
+    def test_file_not_found_error(self):
+        """Test error handling for non-existent SRT file"""
+        non_existent_path = os.path.join(self.temp_dir, "nonexistent.srt")
+        
+        with self.assertRaises(FileNotFoundError):
+            srt_to_json(non_existent_path)
+    
+    def test_unicode_content(self):
+        """Test handling of Unicode content in SRT files"""
+        srt_content = """1
+00:00:00,000 --> 00:00:02,000
+Forrettskjøl! Café naïve résumé
+
+2
+00:00:02,000 --> 00:00:04,000
+测试中文内容 🎵
+
+"""
+        srt_path = self.create_test_srt_file(srt_content)
+        result = srt_to_json(srt_path)
+        
+        self.assertIn('Forrettskjøl!', result['text'])
+        self.assertIn('Café', result['text'])
+        self.assertIn('测试中文内容', result['text'])
+        self.assertIn('🎵', result['text'])
+    
+    def test_segment_gap_detection(self):
+        """Test detection of gaps between segments for word-level grouping"""
+        # Create word-level SRT with a gap
+        srt_content = """1
+00:00:00,000 --> 00:00:01,000
+First
+
+2
+00:00:01,000 --> 00:00:02,000
+word
+
+3
+00:00:05,000 --> 00:00:06,000
+Second
+
+4
+00:00:06,000 --> 00:00:07,000
+segment
+
+"""
+        srt_path = self.create_test_srt_file(srt_content)
+        result = srt_to_json(srt_path)
+        
+        # Should create two segments due to the gap
+        self.assertEqual(len(result['segments']), 2)
+        
+        segment1 = result['segments'][0]
+        self.assertEqual(segment1['text'], 'First word')
+        self.assertEqual(len(segment1['words']), 2)
+        
+        segment2 = result['segments'][1]
+        self.assertEqual(segment2['text'], 'Second segment')
+        self.assertEqual(len(segment2['words']), 2)
 
 
 if __name__ == '__main__':
