@@ -273,11 +273,34 @@ class TranscriptionWorker:
                             logger.error(f"Error processing segment {future_to_index[future]+1}: {e}")
                             raise e
                     
-                    # Store results in order
-                    for i in sorted(results.keys()):
+                    # Store results in order and calculate overlap_start
+                    sorted_indices = sorted(results.keys())
+                    for idx, i in enumerate(sorted_indices):
                         segment_srt_path, segment = results[i]
                         segment_srt_files[i] = segment_srt_path
-                        segment_info[i] = segment
+                        
+                        # Calculate overlap_start for this segment
+                        # For the first segment, overlap_start is 0
+                        # For subsequent segments, it's the overlap with the previous segment
+                        if idx == 0:
+                            overlap_start = 0.0
+                        else:
+                            # Get the previous segment data using the previous index
+                            prev_i = sorted_indices[idx - 1]
+                            prev_segment_data = results[prev_i][1]  # [1] gets the segment from (srt_path, segment) tuple
+                            curr_segment_data = segment
+                            
+                            # Overlap is the amount by which current segment starts before previous ends
+                            overlap = prev_segment_data['end_time'] - curr_segment_data['start_time']
+                            overlap_start = max(0.0, overlap)
+                        
+                        # Create segment info with the required overlap_start field
+                        segment_info[i] = {
+                            'start_time': segment['start_time'],
+                            'end_time': segment['end_time'],
+                            'duration': segment['duration'],
+                            'overlap_start': overlap_start
+                        }
                 
                 # Join SRT files
                 all_srt_entries = join_srt_files_with_overlap(
