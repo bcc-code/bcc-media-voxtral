@@ -281,11 +281,23 @@ class TestProcessTranscriptionToSrt(unittest.TestCase):
         
         self.assertEqual(len(result), 3)
         self.assertEqual(result[0]['text'], 'Hello')
-        self.assertAlmostEqual(result[0]['start_time'], 1.23, places=2)
+        
+        # With non-overlapping logic: 
+        # Word 1 (Hello): middle=1.23, start=halfway between start and 1.23, end=halfway between 1.23 and 2.45
+        # For first word, start = 1.23 - (1.84-1.23) = 1.23 - 0.61 = 0.62
+        # End = (1.23 + 2.45) / 2 = 1.84
+        self.assertAlmostEqual(result[0]['start_time'], 0.62, places=2)
+        self.assertAlmostEqual(result[0]['end_time'], 1.84, places=2)
+        
         self.assertEqual(result[1]['text'], 'world')
-        self.assertAlmostEqual(result[1]['start_time'], 2.45, places=2)
+        # Word 2 (world): middle=2.45, start=(1.23+2.45)/2=1.84, end=(2.45+3.67)/2=3.06
+        self.assertAlmostEqual(result[1]['start_time'], 1.84, places=2)
+        self.assertAlmostEqual(result[1]['end_time'], 3.06, places=2)
+        
         self.assertEqual(result[2]['text'], 'test')
-        self.assertAlmostEqual(result[2]['start_time'], 3.67, places=2)
+        # Word 3 (test): middle=3.67, start=(2.45+3.67)/2=3.06, end=3.67+(3.67-2.45)/2=4.28
+        self.assertAlmostEqual(result[2]['start_time'], 3.06, places=2)
+        self.assertAlmostEqual(result[2]['end_time'], 4.28, places=2)
 
     def test_bracket_format_with_offset(self):
         """Test bracket format with segment offset"""
@@ -295,9 +307,15 @@ class TestProcessTranscriptionToSrt(unittest.TestCase):
         result = process_transcription_to_srt(transcription, segment_offset_seconds=segment_offset)
         
         self.assertEqual(len(result), 2)
-        # First word should start at offset + original time
-        self.assertAlmostEqual(result[0]['start_time'], 11.0, places=1)
-        self.assertAlmostEqual(result[1]['start_time'], 12.0, places=1)
+        # With non-overlapping logic and offset:
+        # Word 1 (Hello): middle=11.0 (1.0+10.0), end=(11.0+12.0)/2=11.5
+        # For first word, start = 11.0 - (11.5-11.0) = 10.5
+        self.assertAlmostEqual(result[0]['start_time'], 10.5, places=1)
+        self.assertAlmostEqual(result[0]['end_time'], 11.5, places=1)
+        
+        # Word 2 (world): middle=12.0, start=(11.0+12.0)/2=11.5, end=12.0+(12.0-11.0)/2=12.5
+        self.assertAlmostEqual(result[1]['start_time'], 11.5, places=1)
+        self.assertAlmostEqual(result[1]['end_time'], 12.5, places=1)
 
     def test_bracket_format_end_times(self):
         """Test that end times are calculated correctly for bracket format"""
@@ -306,10 +324,14 @@ class TestProcessTranscriptionToSrt(unittest.TestCase):
         result = process_transcription_to_srt(transcription)
         
         self.assertEqual(len(result), 3)
-        # End time should be next word's start time
-        self.assertAlmostEqual(result[0]['end_time'], 2.0, places=1)
-        self.assertAlmostEqual(result[1]['end_time'], 3.0, places=1)
-        # Last word gets +0.5 seconds
+        # With non-overlapping logic:
+        # Word 1: middle=1.0, end=(1.0+2.0)/2=1.5
+        self.assertAlmostEqual(result[0]['end_time'], 1.5, places=1)
+        
+        # Word 2: middle=2.0, end=(2.0+3.0)/2=2.5
+        self.assertAlmostEqual(result[1]['end_time'], 2.5, places=1)
+        
+        # Word 3: middle=3.0, end=3.0+(3.0-2.0)/2=3.5
         self.assertAlmostEqual(result[2]['end_time'], 3.5, places=1)
 
     def test_bracket_format_single_word(self):
@@ -320,8 +342,9 @@ class TestProcessTranscriptionToSrt(unittest.TestCase):
         
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]['text'], 'Hello')
-        self.assertAlmostEqual(result[0]['start_time'], 1.23, places=2)
-        self.assertAlmostEqual(result[0]['end_time'], 1.73, places=2)  # +0.5 seconds
+        # Single word: middle=1.23, start=1.23-0.25=0.98, end=1.23+0.25=1.48 (0.5s total duration)
+        self.assertAlmostEqual(result[0]['start_time'], 0.98, places=2)
+        self.assertAlmostEqual(result[0]['end_time'], 1.48, places=2)
 
     def test_bracket_format_with_punctuation(self):
         """Test bracket format with punctuation"""
@@ -369,8 +392,16 @@ class TestProcessTranscriptionToSrt(unittest.TestCase):
         result = process_transcription_to_srt(transcription)
         
         self.assertEqual(len(result), 2)
-        self.assertAlmostEqual(result[0]['start_time'], 83.45, places=2)  # 1*60 + 23.45
-        self.assertAlmostEqual(result[1]['start_time'], 154.56, places=2)  # 2*60 + 34.56
+        # With non-overlapping logic:
+        # Word 1 (Hello): middle=83.45, end=(83.45+154.56)/2=119.005
+        # For first word, start = 83.45 - (119.005-83.45) = 47.895
+        self.assertAlmostEqual(result[0]['start_time'], 47.895, places=2)
+        self.assertAlmostEqual(result[0]['end_time'], 119.005, places=2)
+        
+        # Word 2 (world): middle=154.56, start=(83.45+154.56)/2=119.005
+        # end=154.56+(154.56-83.45)/2=190.115
+        self.assertAlmostEqual(result[1]['start_time'], 119.005, places=2)
+        self.assertAlmostEqual(result[1]['end_time'], 190.115, places=2)
 
 
 class TestTimestampDetection(unittest.TestCase):

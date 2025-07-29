@@ -462,6 +462,10 @@ def process_transcription_to_srt(transcription: str, segment_offset_seconds: flo
     """
     Process transcription text and convert to SRT entries
     Handles both word-level timestamps and fallback sentence-based timing
+    
+    NOTE: Word timestamps are treated as indicating the MIDDLE of each word,
+    not the start or end time. Start and end times are calculated based on
+    this midpoint positioning.
     """
     entries = []
     
@@ -567,8 +571,15 @@ def process_transcription_to_srt(transcription: str, segment_offset_seconds: flo
                 time_per_word = segment_duration / len(words) if words else 1.0
                 
                 for j, word in enumerate(words):
-                    word_start = start_time + (j * time_per_word)
-                    word_end = start_time + ((j + 1) * time_per_word)
+                    # Calculate word timing with timestamp representing the middle of each word
+                    word_center = start_time + (j + 0.5) * time_per_word
+                    half_word_duration = time_per_word / 2
+                    
+                    word_start = word_center - half_word_duration
+                    word_end = word_center + half_word_duration
+                    
+                    # Ensure start time is not negative
+                    word_start = max(0, word_start)
                     
                     entries.append({
                         'index': len(entries) + 1,
@@ -579,20 +590,47 @@ def process_transcription_to_srt(transcription: str, segment_offset_seconds: flo
         
         else:
             # Handle other timestamp formats (existing word-level logic)
+            # NOTE: Timestamps from API indicate the MIDDLE of each word
             for i, word_data in enumerate(word_timestamps):
                 word = word_data['word']
-                timestamp = word_data['timestamp']
+                middle_timestamp = word_data['timestamp']
                 
-                # Calculate end time (use next word's timestamp or estimate)
+                # Calculate start and end times to avoid overlaps
                 if i < len(word_timestamps) - 1:
-                    end_time = word_timestamps[i + 1]['timestamp']
+                    next_middle = word_timestamps[i + 1]['timestamp']
+                    # End time is halfway between this word's middle and next word's middle
+                    end_time = (middle_timestamp + next_middle) / 2
                 else:
-                    end_time = timestamp + 0.5  # Add 0.5 seconds for last word
+                    # For last word, estimate duration based on previous word or use default
+                    if i > 0:
+                        prev_middle = word_timestamps[i - 1]['timestamp']
+                        word_duration = middle_timestamp - prev_middle
+                        end_time = middle_timestamp + word_duration / 2
+                    else:
+                        # Single word case - use reasonable default
+                        end_time = middle_timestamp + 0.25  # 0.5s total duration
+                
+                # Start time is calculated similarly for previous boundary
+                if i > 0:
+                    prev_middle = word_timestamps[i - 1]['timestamp']
+                    # Start time is halfway between previous word's middle and this word's middle
+                    start_time = (prev_middle + middle_timestamp) / 2
+                else:
+                    # For first word, calculate start based on end time and reasonable duration
+                    if i < len(word_timestamps) - 1:
+                        word_duration = end_time - middle_timestamp
+                        start_time = middle_timestamp - word_duration
+                    else:
+                        # Single word case
+                        start_time = middle_timestamp - 0.25  # 0.5s total duration
+                
+                # Ensure start time is not negative
+                start_time = max(0, start_time)
                 
                 # Create individual SRT entry for each word
                 entries.append({
                     'index': i + 1,
-                    'start_time': timestamp,
+                    'start_time': start_time,
                     'end_time': end_time,
                     'text': word
                 })
@@ -613,8 +651,14 @@ def process_transcription_to_srt(transcription: str, segment_offset_seconds: flo
             seconds_per_word = 1 / words_per_second  # ~0.4 seconds per word
             
             for i, word in enumerate(words):
-                start_time = segment_offset_seconds + (i * seconds_per_word)
-                end_time = segment_offset_seconds + ((i + 1) * seconds_per_word)
+                word_center = segment_offset_seconds + (i + 0.5) * seconds_per_word
+                half_word_duration = seconds_per_word / 2
+                
+                start_time = word_center - half_word_duration
+                end_time = word_center + half_word_duration
+                
+                # Ensure start time is not negative
+                start_time = max(0, start_time)
                 
                 entries.append({
                     'index': i + 1,
