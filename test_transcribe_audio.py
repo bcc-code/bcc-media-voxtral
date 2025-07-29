@@ -308,7 +308,7 @@ class TestTimestampDetection(unittest.TestCase):
         
         # Test range format
         transcription_with_range = "[ 0m0s694ms - 0m3s34ms ] This is a test"
-        self.assertTrue(has_timestamps(transcription_with_range))
+        self.assertFalse(has_timestamps(transcription_with_range))
         
         # Test without timestamps
         transcription_without_timestamps = "Hello world this is just text"

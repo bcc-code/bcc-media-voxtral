@@ -254,44 +254,12 @@ class TranscriptionWorker:
                 segment_srt_files = {}
                 segment_info = {}
                 
-                def process_segment(segment_data):
-                    """Process a single segment and return the results"""
-                    i, segment = segment_data
-                    logger.info(f"Processing segment {i+1}/{len(segments)}")
-                    
-                    # Transcribe segment
-                    transcription = self.transcriber.transcribe_segment(
-                        segment['path'],
-                        language=job.language if job.language != "auto" else None,
-                        max_retries=3
-                    )
-                    
-                    # Convert to SRT entries
-                    srt_entries = process_transcription_to_srt(transcription, 0, False)
-                    
-                    # Generate SRT file for segment
-                    segment_srt_filename = f"segment_{i+1:03d}.srt"
-                    segment_srt_path = os.path.join(temp_dir, segment_srt_filename)
-                    
-                    with open(segment_srt_path, 'w', encoding='utf-8') as f:
-                        for entry in srt_entries:
-                            srt_text = SRTFormatter.create_srt_entry(
-                                entry['index'],
-                                entry['start_time'],
-                                entry['end_time'],
-                                entry['text']
-                            )
-                            f.write(srt_text)
-                    
-                    return i, segment_srt_path, segment
-                
                 # Use ThreadPoolExecutor for parallel processing
-
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     # Submit all segment processing tasks
                     future_to_index = {}
                     for i, segment in enumerate(segments):
-                        future = executor.submit(process_segment, (i, segment))
+                        future = executor.submit(self._process_segment, i, segment, job, temp_dir, len(segments))
                         future_to_index[future] = i
                     
                     # Collect results as they complete
@@ -353,6 +321,36 @@ class TranscriptionWorker:
         # Send callback if specified
         self._send_callback(job)
     
+    def _process_segment(self, i, segment, job, temp_dir, total_segments):
+        """Process a single segment and return the results"""
+        logger.info(f"Processing segment {i+1}/{total_segments}")
+        
+        # Transcribe segment
+        transcription = self.transcriber.transcribe_segment(
+            segment['path'],
+            language=job.language if job.language != "auto" else None,
+            max_retries=3
+        )
+        
+        # Convert to SRT entries
+        srt_entries = process_transcription_to_srt(transcription, 0, False)
+        
+        # Generate SRT file for segment
+        segment_srt_filename = f"segment_{i+1:03d}.srt"
+        segment_srt_path = os.path.join(temp_dir, segment_srt_filename)
+        
+        with open(segment_srt_path, 'w', encoding='utf-8') as f:
+            for entry in srt_entries:
+                srt_text = SRTFormatter.create_srt_entry(
+                    entry['index'],
+                    entry['start_time'],
+                    entry['end_time'],
+                    entry['text']
+                )
+                f.write(srt_text)
+        
+        return i, segment_srt_path, segment
+
     def _generate_outputs(self, srt_entries: List[Dict], format_spec: str, 
                          output_dir: Path, base_name: str) -> Dict[str, str]:
         """Generate output files based on format specification"""

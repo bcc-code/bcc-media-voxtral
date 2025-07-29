@@ -202,7 +202,7 @@ class MistralAudioTranscriber:
         return ""
 
 
-timestamp_pattern = r'\[\s*\d+m\d+s\d+ms\s*(?:-\s*\d+m\d+s\d+ms\s*)?\]'
+timestamp_pattern = r'(.+?)\s+\[\s*(\d+m\d+s\d+ms)\s*]'
 
 
 def has_timestamps(transcription: str) -> bool:
